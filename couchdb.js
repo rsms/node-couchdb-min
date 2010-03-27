@@ -97,12 +97,12 @@ exports.Db = function Db(options) {
   if (!this.port) this.port = 5984;
   if (!this.host) this.host = 'localhost';
   // setup a connection pool
-	this.connectionPool.create = function(){
-	  var conn = http.createClient(self.port, self.host);
-	  if (self.secure) {
-	    if (typeof self.secure !== 'object') self.secure = {};
-  	  conn.setSecure('X509_PEM', self.secure.ca_certs, self.secure.crl_list, 
-  	    self.secure.private_key, self.secure.certificate);
+  this.connectionPool.create = function(){
+    var conn = http.createClient(self.port, self.host);
+    if (self.secure) {
+      if (typeof self.secure !== 'object') self.secure = {};
+      conn.setSecure('X509_PEM', self.secure.ca_certs, self.secure.crl_list, 
+        self.secure.private_key, self.secure.certificate);
     }
     conn._onclose = function(hadError, reason) {
       self.connectionPool.remove(conn);
@@ -111,11 +111,11 @@ exports.Db = function Db(options) {
       try { conn.removeListener('close', conn._onclose); }catch(e){}
     }
     conn.addListener('close', conn._onclose);
-	  return conn;
-	}
-	this.connectionPool.destroy = function(conn){
-	  try { conn.removeListener('close', conn._onclose); }catch(e){}
-	  try { conn.close(); }catch(e){}
+    return conn;
+  }
+  this.connectionPool.destroy = function(conn){
+    try { conn.removeListener('close', conn._onclose); }catch(e){}
+    try { conn.close(); }catch(e){}
   }
   process.addListener("exit", function (){
     // avoid lingering FDs
@@ -191,6 +191,10 @@ mixin(exports.Db.prototype, {
     if (typeof options === 'string') opt.path = options;
     else if (typeof options !== 'object') throw new Error('options must be a string or an object');
     else for (var k in options) opt[k] = options[k];
+
+    if (callback && typeof callback !== 'function')
+      throw new Error('callback must be a function');
+
     opt.method = opt.method.toUpperCase();
     // Setup headers
     if (!opt.headers.Host)
@@ -228,7 +232,7 @@ mixin(exports.Db.prototype, {
       conn.addListener('close', onConnClose);
       req = conn.request(opt.method, opt.path, opt.headers);
       if (self.debug) {
-        sys.debug(self+' '+opt.method+' '+opt.path+'\n  '+
+        sys.log('['+self+'] --> '+opt.method+' '+opt.path+'\n  '+
           Object.keys(opt.headers).map(function(k){ return k+': '+opt.headers[k]; }).join('\n  ')+
           (opt.body ? '\n\n  '+opt.body : ''));
       }
@@ -237,29 +241,40 @@ mixin(exports.Db.prototype, {
         res = _res;
         var data = '';
         //res.setBodyEncoding('utf-8'); // why does this fail?
-        res.addListener('data', function (chunk){ data += chunk; });
+        res.addListener('data', function (chunk){
+          data += chunk;
+        });
         res.addListener('end', function(){
           conn.removeListener('close', onConnClose);
           self.connectionPool.put(conn);
           if (timeoutId !== undefined) clearTimeout(timeoutId);
+          // log
+          if (self.debug) {
+            sys.log('['+self+'] <-- '+opt.method+' '+opt.path+' ['+res.statusCode+']\n  '+
+              Object.keys(res.headers).map(function(k){ return k+': '+res.headers[k]; }).join('\n  ')+
+              (data.length ? '\n\n  '+data : ''));
+          }
+          // parse body
           try {
-    				var result = JSON.parse(data);
-    				if ('error' in result) {
-              if (!cbFired && callback) {
-                cbFired = 1;
-                var err = new Error('CouchDb error: '+(result.reason || result.error));
-                err.couchDbError = result.error;
-                callback(err, result, res);
-              }
-              return;
-            } else if (callback && !cbFired) {
-              cbFired = 1; callback(null, result, res);
-  				  }
-    			} catch(err){
-    				if (!cbFired && callback) {
-    				  cbFired = 1; callback(err, undefined, res);
-  				  }
-    			}
+            var result = JSON.parse(data);
+          } catch (err) {
+            if (!cbFired && callback) {
+              err.message = 'JSON parse error: '+err.message+'. Input was: '+sys.inspect(data);
+              cbFired = 1; callback(err, undefined, res);
+            }
+          }
+          // check and handle result
+          if ('error' in result) {
+            if (!cbFired && callback) {
+              cbFired = 1;
+              var err = new Error('CouchDb '+result.error+': '+(result.reason || '?'));
+              err.couchDbError = result.error;
+              callback(err, result, res);
+            }
+            return;
+          } else if (callback && !cbFired) {
+            cbFired = 1; callback(null, result, res);
+          }
         });
       });
       req.close();
@@ -268,21 +283,21 @@ mixin(exports.Db.prototype, {
     // Timeout
     opt.timeout = opt.timeout || this.requestTimeout;
     if (typeof opt.timeout === 'number' && opt.timeout > 0) {
-  	  timeoutId = setTimeout(function(){
-  	    self.connectionPool.cancelGet(onconn);
-  	    if (req) req.removeAllListeners('response');
-  	    if (res) {
-  	      res.removeAllListeners('data');
-  	      res.removeAllListeners('end');
-  	    }
-  	    if (self.debug || opt.debug)
-  	      sys.log(self+' timed out after '+(opt.timeout/1000.0)+' seconds');
-  	    if (callback && !cbFired) {
-  	      cbFired = 1;
-  	      callback(new Error(req ? 'CounchDB connection timeout' : 'CouchDB connection pool timeout'));
-	      }
-  	  }, opt.timeout);
-  	}
+      timeoutId = setTimeout(function(){
+        self.connectionPool.cancelGet(onconn);
+        if (req) req.removeAllListeners('response');
+        if (res) {
+          res.removeAllListeners('data');
+          res.removeAllListeners('end');
+        }
+        if (self.debug || opt.debug)
+          sys.log('['+self+'] --X '+opt.method+' '+opt.path+' timed out after '+(opt.timeout/1000.0)+' seconds');
+        if (callback && !cbFired) {
+          cbFired = 1;
+          callback(new Error(req ? 'CounchDB connection timeout' : 'CouchDB connection pool timeout'));
+        }
+      }, opt.timeout);
+    }
   },
   
   _putOrGet: function(method, options, body, callback) {
