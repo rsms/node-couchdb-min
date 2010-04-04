@@ -115,7 +115,6 @@ exports.Db = function Db(options) {
   if (this.db && typeof this.db !== 'string') throw new Error('db property must be a string');
   if (!this.port) this.port = 5984;
   if (!this.host) this.host = 'localhost';
-  if (this.options.auth) this.auth = options.auth;
   this.connectionPool = exports.getConnectionPool(
     this.host, this.port, this.secure);
 }
