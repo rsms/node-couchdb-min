@@ -68,6 +68,28 @@ exports.jsonEncode = function(data) {
 };
 
 // -----------------------------------------------------------------------------
+// connection pools keyed by "host:port:secure?"
+
+var connectionPools = {},
+    connectionPoolDefaults = {
+      limit: 250,
+      keepalive: 3
+    };
+
+exports.getConnectionPool = function(host, port, secure) {
+  var key = host+':'+port+(secure ? ':1' : ':0'),
+      pool = connectionPools[key];
+  if (!pool) {
+    pool = new HTTPConnectionPool(
+        connectionPoolDefaults.keepalive,
+        connectionPoolDefaults.limit,
+        port, host, secure);
+    connectionPools[key] = pool;
+  }
+  return pool;
+}
+
+// -----------------------------------------------------------------------------
 // Db
 
 /**
@@ -89,42 +111,15 @@ exports.jsonEncode = function(data) {
 exports.Db = function Db(options) {
   if (typeof options === 'object') for (var k in options) this[k] = options[k];
   else this.db = options;
-  this.connectionPool = new Pool(
-    (this.minConnections === undefined ? 1 : this.minConnections),
-    (this.maxConnections || 250));
-  var self = this;
+  if (this.debug === undefined && exports.debug) this.debug = true;
   if (this.db && typeof this.db !== 'string') throw new Error('db property must be a string');
   if (!this.port) this.port = 5984;
   if (!this.host) this.host = 'localhost';
-  // setup a connection pool
-  this.connectionPool.create = function(){
-    var conn = http.createClient(self.port, self.host);
-    if (self.secure) {
-      if (typeof self.secure !== 'object') self.secure = {};
-      conn.setSecure('X509_PEM', self.secure.ca_certs, self.secure.crl_list, 
-        self.secure.private_key, self.secure.certificate);
-    }
-    conn._onclose = function(hadError, reason) {
-      self.connectionPool.remove(conn);
-      if (hadError)
-        self.connectionPool.emit('error', new Error('Connection error'+(reason ? ': '+reason : '')));
-      try { conn.removeListener('close', conn._onclose); }catch(e){}
-    }
-    conn.addListener('close', conn._onclose);
-    return conn;
-  }
-  this.connectionPool.destroy = function(conn){
-    try { conn.removeListener('close', conn._onclose); }catch(e){}
-    try { conn.close(); }catch(e){}
-  }
-  process.addListener("exit", function (){
-    // avoid lingering FDs
-    try { self.connectionPool.removeAll(); }catch(e){}
-    try { delete self.connectionPool; }catch(e){}
-  });
+  this.connectionPool = exports.getConnectionPool(
+    this.host, this.port, this.secure);
 }
 mixin(exports.Db.prototype, {
-  
+
   // GET something
   // post( [String path|Object options] [, callback(Error, Object, Response)] )
   get: function(options, callback) {
@@ -132,17 +127,17 @@ mixin(exports.Db.prototype, {
     else options = {method:'GET', path:options};
     return this.request(options, callback);
   },
-  
+
   // PUT something
   // post( [String path|Object options] [, Object body] [, callback(Error, Object, Response)] )
   put: function(options, body, callback) {
-    return this._putOrGet('PUT', options, body, callback);
+    return this._putOrPost('PUT', options, body, callback);
   },
-  
+
   // POST something
   // post( [String path|Object options] [, Object body] [, callback(Error, Object, Response)] )
   post: function(options, body, callback) {
-    return this._putOrGet('POST', options, body, callback);
+    return this._putOrPost('POST', options, body, callback);
   },
 
   // Use request(..) for DELETE et. al.
@@ -178,7 +173,7 @@ mixin(exports.Db.prototype, {
       }
     });
   },
-  
+
   // Send a request to the server/database
   request: function(options, callback) {
     var self = this, timeoutId, req, res, cbFired;
@@ -236,7 +231,9 @@ mixin(exports.Db.prototype, {
           Object.keys(opt.headers).map(function(k){ return k+': '+opt.headers[k]; }).join('\n  ')+
           (opt.body ? '\n\n  '+opt.body : ''));
       }
-      if (opt.body) req.write(opt.body, 'utf-8');
+      if (opt.body) {
+        req.write(opt.body, 'utf-8');
+      }
       req.addListener('response', function (_res) {
         res = _res;
         var data = '';
@@ -290,8 +287,10 @@ mixin(exports.Db.prototype, {
           res.removeAllListeners('data');
           res.removeAllListeners('end');
         }
-        if (self.debug || opt.debug)
-          sys.log('['+self+'] --X '+opt.method+' '+opt.path+' timed out after '+(opt.timeout/1000.0)+' seconds');
+        if (self.debug || opt.debug) {
+          sys.log('['+self+'] --X '+opt.method+' '+opt.path+' timed out after '+
+            (opt.timeout/1000.0)+' seconds');
+        }
         if (callback && !cbFired) {
           cbFired = 1;
           callback(new Error(req ? 'CounchDB connection timeout' : 'CouchDB connection pool timeout'));
@@ -299,8 +298,8 @@ mixin(exports.Db.prototype, {
       }, opt.timeout);
     }
   },
-  
-  _putOrGet: function(method, options, body, callback) {
+
+  _putOrPost: function(method, options, body, callback) {
     if (typeof options === 'object') options.method = method;
     else options = {method:method, path:options};
     if (typeof body === 'function') {
@@ -312,7 +311,7 @@ mixin(exports.Db.prototype, {
     }
     return this.request(options, callback);
   },
-  
+
   toString: function() {
     return (module.id !== '.' ? module.id+'.':'')+
       (this.constructor.name || 'Object')+'('+
@@ -322,6 +321,7 @@ mixin(exports.Db.prototype, {
 
 // ----------------------------------------------------------------------------
 // Simple instance pool (aka free list)
+
 function Pool(keep, limit) {
   process.EventEmitter.call(this);
   this.keep = keep || 0;
@@ -372,3 +372,40 @@ Pool.prototype.removeAll = function(noDestroy) {
   this.free = [];
 }
 Pool.prototype.destroy = function(item) { }
+
+// ----------------------------------------------------------------------------
+// HTTP connection pool
+
+function HTTPConnectionPool(keep, limit, port, host, secure) {
+  Pool.call(this);
+  this.port = port;
+  this.host = host;
+  this.secure = secure;
+  var self = this;
+  process.addListener("exit", function (){
+    // avoid lingering FDs
+    try { self.removeAll(); }catch(e){}
+    try { delete self; }catch(e){}
+  });
+}
+sys.inherits(HTTPConnectionPool, Pool);
+HTTPConnectionPool.prototype.create = function(){
+  var self = this, conn = http.createClient(this.port, this.host);
+  if (this.secure) {
+    if (typeof this.secure !== 'object') this.secure = {};
+	  conn.setSecure('X509_PEM', this.secure.ca_certs, this.secure.crl_list,
+	    this.secure.private_key, this.secure.certificate);
+  }
+  conn._onclose = function(hadError, reason) {
+    self.remove(conn);
+    if (hadError)
+      self.emit('error', new Error('Connection error'+(reason ? ': '+reason : '')));
+    try { conn.removeListener('close', conn._onclose); }catch(e){}
+  }
+  conn.addListener('close', conn._onclose);
+  return conn;
+}
+HTTPConnectionPool.prototype.destroy = function(conn){
+  try { conn.removeListener('close', conn._onclose); }catch(e){}
+  try { conn.close(); }catch(e){}
+}
