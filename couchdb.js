@@ -426,7 +426,7 @@ function base64_encode (str) {
       tmp_arr = [];
   if (!str) return str;
   data = new Buffer(str.length*2);
-  datalen = data.utf8Write(str);
+  datalen = data.utf8Write(str)-1;
   do { // pack three octets into four hexets
     o1 = data[i++];
     o2 = data[i++];
