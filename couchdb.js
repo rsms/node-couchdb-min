@@ -115,6 +115,7 @@ exports.Db = function Db(options) {
   if (this.db && typeof this.db !== 'string') throw new Error('db property must be a string');
   if (!this.port) this.port = 5984;
   if (!this.host) this.host = 'localhost';
+  if (this.options.auth) this.auth = options.auth;
   this.connectionPool = exports.getConnectionPool(
     this.host, this.port, this.secure);
 }
@@ -189,8 +190,15 @@ mixin(exports.Db.prototype, {
 
     if (callback && typeof callback !== 'function')
       throw new Error('callback must be a function');
-
     opt.method = opt.method.toUpperCase();
+    // Auth?
+    if (this.auth) {
+      var authType = this.auth.type || 'basic';
+      if (authType !== 'basic')
+        throw new Error('only "basic" auth.type is supported');
+      opt.headers.Authorization = 'Basic '+
+        base64_encode(this.auth.username+":"+this.auth.password);
+    }
     // Setup headers
     if (!opt.headers.Host)
       opt.headers.Host = this.host;
@@ -408,4 +416,35 @@ HTTPConnectionPool.prototype.create = function(){
 HTTPConnectionPool.prototype.destroy = function(conn){
   try { conn.removeListener('close', conn._onclose); }catch(e){}
   try { conn.close(); }catch(e){}
+}
+
+// ----------------------------------------------------------------------------
+// Base64 encoding
+var Buffer = require('buffer').Buffer;
+const B64CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+function base64_encode (str) {
+  var data, datalen, o1, o2, o3, h1, h2, h3, h4, bits, i = 0, ac = 0, enc="",
+      tmp_arr = [];
+  if (!str) return str;
+  data = new Buffer(str.length*2);
+  datalen = data.utf8Write(str);
+  do { // pack three octets into four hexets
+    o1 = data[i++];
+    o2 = data[i++];
+    o3 = data[i++];
+    bits = o1<<16 | o2<<8 | o3;
+    h1 = bits>>18 & 0x3f;
+    h2 = bits>>12 & 0x3f;
+    h3 = bits>>6 & 0x3f;
+    h4 = bits & 0x3f;
+    // use hexets to index into B64CHARS, and append result to encoded string
+    tmp_arr[ac++] = B64CHARS.charAt(h1) + B64CHARS.charAt(h2) + 
+      B64CHARS.charAt(h3) + B64CHARS.charAt(h4);
+  } while (i < datalen);
+  enc = tmp_arr.join('');
+  switch (datalen % 3) {
+    case 1: enc = enc.slice(0, -2) + '=='; break;
+    case 2: enc = enc.slice(0, -1) + '='; break;
+  }
+  return enc;
 }
