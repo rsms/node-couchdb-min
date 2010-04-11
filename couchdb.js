@@ -281,7 +281,7 @@ mixin(exports.Db.prototype, {
           }
         });
       });
-      req.close();
+      req.end();
     }
     this.connectionPool.get(onconn);
     // Timeout
@@ -414,7 +414,7 @@ HTTPConnectionPool.prototype.create = function(){
 }
 HTTPConnectionPool.prototype.destroy = function(conn){
   try { conn.removeListener('close', conn._onclose); }catch(e){}
-  try { conn.close(); }catch(e){}
+  try { conn.end(); }catch(e){}
 }
 
 // ----------------------------------------------------------------------------
@@ -426,7 +426,7 @@ function base64_encode (str) {
       tmp_arr = [];
   if (!str) return str;
   data = new Buffer(str.length*2);
-  datalen = data.utf8Write(str)-1;
+  datalen = data.utf8Write(str);
   do { // pack three octets into four hexets
     o1 = data[i++];
     o2 = data[i++];
