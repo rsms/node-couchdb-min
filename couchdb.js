@@ -180,7 +180,7 @@ mixin(exports.Db.prototype, {
     // Options
     var opt = {
       method: 'GET',
-      headers: []
+      headers: {}
       // Optional: path, query, body, timeout
     }
     if (typeof options === 'string') opt.path = options;
